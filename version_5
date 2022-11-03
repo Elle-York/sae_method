@@ -1,0 +1,16 @@
+
+
+# Author: DY      07 July 2022
+
+# Read in CSV file containing local area estimates generated through SQL script
+
+PrevEst_SMI <- fread("Prep_bootstrap_R_input.csv")
+
+
+# Using the function: quantile('dataframe$column', probs=seq(0,1,0.25), na.rm = FALSE))
+# This function calculates intervals for specified ranges. i.e. quartiles = 0.25, quintiles = 0.2, deciles = 0.1 )
+# Specify the column containing vectors you want to calculation the interval range. The function will order the vectors in ascending order and calculation ranges at specified intervals
+
+quantile(PrevEst_SMI$cprd_prev,probs=seq(0,1,0.25),na.rm = FALSE) # quartile range
+quantile(PrevEst_SMI$cprd_prev,probs=seq(0,1,0.20),na.rm = FALSE) # quintile range
+quantile(PrevEst_SMI$cprd_prev,probs=seq(0,1,0.10),na.rm = FALSE) # decile range
