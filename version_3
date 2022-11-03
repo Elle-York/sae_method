@@ -1,0 +1,170 @@
+########################################################################################################################
+# PREAMBLE
+########################################################################################################################
+
+library(dplyr); library(data.table); library(odbc); library(dbplyr); library(stringr)
+
+# logit function
+logit <- function(x) {log(x/(1-x))}
+
+########################################################################################################################
+# READ IN DATA - only needs to be run once
+########################################################################################################################
+
+# read in prevalence
+APMS_prevalence_estimates <- fread(paste0("1.Data/APMS_Prevalence/APMS_2014_Prevalence_AgeSexIMD_NatCenConfInts_v2.csv")) %>%
+  rename(Sex = sex, AgeGrp = age, IMD_quintile = imd)
+
+# read in LSOA populations by sex and age group
+conn <- DBI::dbConnect(odbc::odbc(),
+                       dsn = "SC",
+                       Database = "Populations",
+                       encrypt = "true",
+                       trusted_connection = "true")
+
+# list available tables dbListTables(conn)
+# list columns is table dbListFields(conn, "vLKP_LSOA11")
+
+LSOA_populations <- tbl(conn, "vRes_LSOA11_SingleYear") %>%
+  filter(Period == 2017, Sex != 4, Age >=16) %>%
+  select(LSOA11CD = OfficialCode, Sex = SexDesc, Age, n = Population) %>% as_tibble() %>%
+  filter(str_detect(LSOA11CD, "^E")) %>%
+  mutate(AgeGrp = case_when(
+    Age <=24 ~ "16-24",
+    Age >=25 & Age <=64 ~ "25-64",
+    Age >= 65 ~ "65+")) %>%
+  group_by(LSOA11CD, Sex, AgeGrp) %>% summarise(N = sum(n, na.rm = T))
+
+dbDisconnect(conn)
+
+# read in Lookups
+conn <- DBI::dbConnect(odbc::odbc(),
+                       dsn = "SC",
+                       Database = "LookupsShared",
+                       encrypt = "true",
+                       trusted_connection = "true")
+
+LSOA_mapping <- tbl(conn, "vLKP_LSOA11") %>%
+  select(LSOA11CD, LSOA11NM, CCG18CD, CCG18NM, STP18CD, STP18NM, LTLA13CD, LTLA13NM, UTLA13CD, UTLA13NM, RGN09CD, RGN09NM, CTRY09CD, CTRY09NM) %>% 
+  as_tibble()
+
+dbDisconnect(conn)
+
+# IMD quintiles for LSOA 
+
+LSOA_IMD <- fread("1.Data/2010_IMD_LSOA11.csv") %>%
+  select(LSOA11CD, IMD_quintile = `National quintile`) 
+
+########################################################################################################################.
+# SET FEATURES - REQUIRE MANUAL INPUT!!! ####
+########################################################################################################################.
+
+# set number of iterations for simulations
+iterations <- 2
+
+# set whether 16+, 18+ or 65+
+AGES_65 <- "N" # Y or N
+
+
+
+for (Geog in c("CCG18", "STP18", "LTLA13", "UTLA13", "RGN09", "CTRY09")){
+  
+  # set seeds for QA purpose 
+  seed_1 <- case_when(Geog == "CCG18" ~ 100,
+                    Geog == "LTLA13" ~ 2,
+                    Geog == "UTLA13" ~ 3,
+                    Geog == "STP18" ~ 4,
+                    Geog == "RGN09" ~ 5,
+                    Geog == "CTRY09" ~ 11)
+  
+  seed_2 <- case_when(Geog == "CCGApr18" ~ 6,
+                      Geog == "LTLA13" ~ 7,
+                      Geog == "UTLA13" ~ 8,
+                      Geog == "STPApr18" ~ 9,
+                      Geog == "RGN09" ~ 10,
+                      Geog == "CTRY09" ~ 12)
+  
+  set.seed(ifelse(AGES_65 == "N", seed_1, seed_2)) 
+
+  ########################################################################################################################.
+  # LINK RELEVANT DATA TOGETHER AND EXCLUDE WHERE APPROPRIATE####
+  ########################################################################################################################.
+  
+  # Link demographic data together: populations, IMD, Lookups to higher geog
+  
+  Linked <- full_join(LSOA_populations, LSOA_IMD, by = "LSOA11CD") %>%
+    full_join(.,select(LSOA_mapping, LSOA11CD, matches(Geog)), by = "LSOA11CD")
+  
+  #  if 65+ indicator, restrict age
+  if(AGES_65 == "Y") {
+    Linked <- Linked %>% filter(AgeGrp == "65+")}
+  
+  if(AGES_65 == "Y") {
+    APMS_prevalence_estimates <- filter(APMS_prevalence_estimates, AgeGrp == "65+")}
+  
+  ########################################################################################################################.
+  # POINT ESTIMATES ####
+  ########################################################################################################################.
+  
+  # join demographic data with sampled national prevalence and calculate CMHD count and prevalence at specified geography level
+  Local_Prev <- full_join(Linked, APMS_prevalence_estimates, by = c("Sex", "AgeGrp", "IMD_quintile")) %>%
+    mutate(Count_LSOA = prev * N/100) %>%
+    group_by_(paste0(Geog, "CD"), paste0(Geog, "NM")) %>% summarise(Count = sum(Count_LSOA, na.rm = T), N = sum(N, na.rm = T)) %>%
+    mutate(LocalPrev = Count/N*100) %>% 
+    arrange_(paste0(Geog, "CD"), paste0(Geog, "NM"))
+  
+  ########################################################################################################################.
+  # CIs ####
+  ########################################################################################################################.
+  
+  # calculate logit prevalence
+  Prev_Estimates <- mutate(APMS_prevalence_estimates, logit_p = logit(prev/100), se_p = (logit(ci.upper/100) - logit(ci.lower/100))/(2*1.96))
+  
+  # create df to store results in with CCG codes (order by CCG code)
+  SimPrev_Combined <- select(LSOA_mapping, matches(Geog)) %>%
+    distinct(.) %>% arrange_((paste0(Geog, "CD")))
+  
+  # bootstrap
+  
+  for (i in 1:iterations){
+    # simulate logit(prev) from normal distribution of each prev ~ N(logit(prev), se(prev))
+    temp <- apply(Prev_Estimates[,c("logit_p", "se_p")], 1, function(df) rnorm(1, df["logit_p"], df["se_p"]))
+    
+    # reverse logit to calculate sim prev and store as df with subgroup names
+    temp1 <- cbind(select(Prev_Estimates, Sex, AgeGrp, IMD_quintile), "SimPrev" = exp(temp)/(1+exp(temp))*100)
+    
+    # calculate simulated prevalence at CCG level
+    SimPrev_HigherGeog <- full_join(Linked, temp1, by = c("Sex", "AgeGrp", "IMD_quintile")) %>%
+      mutate(SimCMHDCount = SimPrev * N/100) %>%
+      group_by_((paste0(Geog, "CD"))) %>% summarise(SimCMHDCount_HighGeog = sum(SimCMHDCount, na.rm = T), N = sum(N, na.rm = T)) %>%
+      mutate(SimCMHDPrev_HighGeog = SimCMHDCount_HighGeog/N*100) %>% 
+      arrange_(paste0(Geog, "CD"))
+    
+    # combine CCG results into one df
+    SimPrev_Combined <- cbind(SimPrev_Combined, select(SimPrev_HigherGeog, SimCMHDPrev_HighGeog))
+  }
+  
+  # extract 95% credible intervals from simulated CCG prevalence
+  CredibleIntervals <- tibble(SimPrev_Combined[,paste0(Geog, "CD")],
+                                  SimPrev_Combined[,paste0(Geog, "NM")],
+                                  "CI_Lower" = apply(SimPrev_Combined[,c(3:dim(SimPrev_Combined)[2])], 1, function(df_row) quantile(df_row, 0.025)),
+                                  "CI_Upper" = apply(SimPrev_Combined[,c(3:dim(SimPrev_Combined)[2])], 1, function(df_row) quantile(df_row, 0.975)))
+  
+  names(CredibleIntervals)[1:2] = c(paste0(Geog, "CD"), paste0(Geog, "NM"))
+  
+  ########################################################################################################################.
+  # COMBINE ESTIMATES WITH CIs ####
+  ########################################################################################################################.
+  
+  Combined_Local_Estimates <- full_join(Local_Prev, CredibleIntervals)
+  
+  write.csv(Combined_Local_Estimates, 
+            paste0("3.Results/Final_Output_SC/", Geog, "_", if(AGES_65 == "Y"){"65PLUS_"},  iterations, "iterations", ".csv"), 
+            row.names = F)
+
+}
+
+
+
+
+
