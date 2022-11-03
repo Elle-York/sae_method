@@ -1,0 +1,453 @@
+# 1. Load libraries -----------------------------------------------------------
+
+library(dbplyr);
+library(data.table); 
+library(gtools); 
+library(DescTools);
+library(tidyverse)
+library(stringr)
+
+
+rm(list = ls()) # clears the global environment
+
+# 2. Read in data -------------------------------------------------------------
+
+PrevEst5_17 <- fread("Prev_ConditionSpecific_Age_Gender.csv")
+
+PopEst5_17 <-  fread("ONS_pop_2019_age_5_17_2021_boundaries.csv")
+
+# 3. Check the data ------------------------------------------------------------
+
+glimpse(PrevEst5_17) # Check variable, variable name + variable type
+summary(PrevEst5_17) # Check numeric variables min and max values
+unique(PrevEst5_17$CI_U) # Check unique contents of every variable
+sum(is.na(PrevEst5_17)) # no NAs
+sum(PrevEst5_17 == "")# no empty character cells
+
+# Age is a character variable, but should it be factor?
+# sex is an integer variable, should it be factor?
+
+
+glimpse(PopEst5_17) # Check variable, variable name + variable type
+summary(PopEst5_17) # Check numeric variables min and max values
+unique(PopEst5_17$VersionNumber) # Check unique contents of every variable
+sum(is.na(PopEst5_17))# no NAs
+sum(PopEst5_17 == "") # 5044 blank character cells
+which(PopEst5_17 == "", arr.ind = TRUE) # All in col 4, Line 1 - 5044 empty?
+
+# 305 Official codes
+# Old codes, first cell is empty
+# Geonames = 304 but official codes = 305
+# Sex is integer not factor? SexDesc = character not factor?
+# date has been set as character?
+# VersionNumber = only one entry of 1 in every cell, why have this
+
+# 4. Sort the data -------------------------------------------------------------
+
+PrevEst5_17 <- PrevEst5_17 %>% 
+  arrange(Prevalence_proportion) 
+
+## for QA - important that rows in this table are in same order. 
+## Sorting by prevalence is a simple way of doing this.
+
+# 5. Add age band column to ONS Pop data frame ---------------------------------
+
+PopEst5_17 <-
+  PopEst5_17 %>%
+  mutate(
+    Age_Category = 
+      case_when(
+        Age >=5 & Age <=10 ~ "5-10",
+        Age >=11 & Age <=16 ~ "11-16",
+        Age ==17 ~ "17",
+        TRUE ~ as.character(Age)))
+
+# 6. Summarize ONS pop by age category -----------------------------------------
+
+PopEst5_17 <- PopEst5_17 %>% 
+  group_by(GeoName, OfficialCode, Sex, Age_Category) %>%
+  summarize(Age_cat_pop = sum(Population))
+
+# why not arrange age-category on sort e.g. 5-10, 11-16, 17
+
+# 7. Combine Hackney and City of London, label as Hackney ----------------------
+
+PopEst5_17_CoL <-
+  PopEst5_17 %>%
+  filter(OfficialCode == "E09000001")
+
+PopEst5_17_Hackney <-
+  PopEst5_17 %>%
+  filter(OfficialCode == "E09000012")
+
+PopEst5_17_HackneyCoL <- 
+    left_join(PopEst5_17_Hackney,PopEst5_17_CoL, by = c("Sex"="Sex","Age_Category"="Age_Category")) %>%
+    mutate (Age_cat_pop=Age_cat_pop.x + Age_cat_pop.y)
+    
+PopEst5_17_HackneyCoL <- select (PopEst5_17_HackneyCoL, GeoName.x, OfficialCode.x, Sex, Age_Category, Age_cat_pop ) %>%
+    rename (GeoName = GeoName.x,
+            OfficialCode = OfficialCode.x)
+
+
+# 8. Combine Cornwall and Isles of Scilly, label as Cornwall -------------------
+
+PopEst5_17_IoS <-
+  PopEst5_17 %>%
+  filter(OfficialCode == "E06000053")
+
+PopEst5_17_Cornwall <-
+  PopEst5_17 %>%
+  filter(OfficialCode == "E06000052")
+
+PopEst5_17_CornwallIoS <- 
+  left_join(PopEst5_17_Cornwall,PopEst5_17_IoS, 
+            by = c("Sex"="Sex","Age_Category"="Age_Category")) %>%
+  mutate (Age_cat_pop=Age_cat_pop.x + Age_cat_pop.y)
+
+PopEst5_17_CornwallIoS <- select(PopEst5_17_CornwallIoS, 
+                                 GeoName.x, 
+                                 OfficialCode.x, 
+                                 Sex, 
+                                 Age_Category, 
+                                 Age_cat_pop) %>%
+  rename (GeoName = GeoName.x,
+          OfficialCode = OfficialCode.x)
+
+# 9. Remove Hackney, City of London, Cornwall and Isles of Scilly --------------
+
+PopEst5_17 <-
+  PopEst5_17 %>%
+  filter(OfficialCode != "E09000001") %>% # City of London
+  filter(OfficialCode != "E06000053") %>% # Isles of Scilly
+  filter(OfficialCode != "E09000012") %>% # Hackney
+  filter(OfficialCode != "E06000052") # Cornwall
+
+
+# 10. Add Hackney/CoL and Cornwall/IoS -----------------------------------------
+
+PopEst5_17 <- rbind(PopEst5_17, PopEst5_17_HackneyCoL, PopEst5_17_CornwallIoS)
+
+# 11. Calculate prevalence built from male and female separately ---------------
+
+PrevPop2019 <- left_join(PrevEst5_17,
+                         PopEst5_17,
+                         by = c("Age" = "Age_Category", "Sex" = "Sex"))
+
+PrevPop2019 <-
+  PrevPop2019 %>%
+  mutate(
+    Local_count = (Prevalence_proportion*Age_cat_pop)/100)
+
+PrevPop2019_mf <-
+  PrevPop2019 %>% 
+  group_by(OfficialCode, Condition, Sex) %>%
+  summarize(Local_pop_5_17 = sum(Age_cat_pop),
+            Local_count_5_17 = sum(Local_count)) %>% 
+  mutate (Local_prev_5_17 = Local_count_5_17/Local_pop_5_17)
+
+PrevPop2019_p <-
+  PrevPop2019 %>% 
+  group_by(OfficialCode, Condition) %>%
+  summarize(Sex = 4, Local_pop_5_17 = sum(Age_cat_pop),
+            Local_count_5_17 = sum(Local_count)) %>% 
+  mutate (Local_prev_5_17 = Local_count_5_17/Local_pop_5_17)
+
+
+PrevPop2019_mfp <- rbind(PrevPop2019_mf,PrevPop2019_p)
+
+##Write to CSV
+
+#write.csv(UTLA_Prev_18_25_mf,"18_25_prevalence_male_female.csv", row.names = TRUE)
+
+##Simulating credible ranges
+
+#################################################################################################.
+# Aged 5-17 ####
+#################################################################################################.
+
+set.seed(2)
+Number_iterations <- c(1:100) 
+
+SimCI_df <-
+  PrevPop2019_mfp %>%
+  group_by(OfficialCode, Condition) %>%
+  distinct(OfficialCode) %>%
+  arrange(OfficialCode)
+
+SimCI_df$Headings <-
+  paste(SimCI_df$OfficialCode,SimCI_df$Condition)
+
+Headings_vector <-
+  pull(SimCI_df,Headings)
+
+# CREATE MATRIX TO STORE SIMULATED RESULTS#
+
+#Persons
+
+Simulation_results_table_p <- matrix(NA, nrow = 0, ncol = 1535)
+
+Simulation_results_table_m <- matrix(NA, nrow = 0, ncol = 1535)
+
+Simulation_results_table_f <- matrix(NA, nrow = 0, ncol = 1535)
+
+colnames(Simulation_results_table_p) <- Headings_vector
+
+colnames(Simulation_results_table_m) <- Headings_vector
+
+colnames(Simulation_results_table_f) <- Headings_vector
+
+#   For loop will start here #
+# 	The prevalence estimates themselves are assumed to be binomially distributed, and the  #
+#   logit-transformed prevalence estimates are assumed to be normally distributed #           
+#   N(logit(p_i),se(logit(p_i))) #
+#   CALCULATE logit(Pi_sim ) using rnorm #
+
+for (i in 1:length(Number_iterations)) {
+  
+  PrevEst5_17_sim <-
+    PrevEst5_17 %>%
+    mutate(Prevalence_proportion = Prevalence_proportion/100)%>% 
+    mutate(CI_L = CI_L/100)%>% 
+    mutate(CI_U = CI_U/100)
+  
+  # CALCULATE LOG TRANSFORMATIONS OF Pi and CIs #
+  
+  PrevEst5_17_sim <- 
+    PrevEst5_17_sim%>% 
+    mutate(logit_Pi = logit(Prevalence_proportion)) %>% 
+    mutate(logit_ci_lower = logit(CI_L)) %>%
+    mutate(logit_ci_upper = logit(CI_U)) 
+  
+  # CALCULATE se(logit(p_i)) #
+  
+  PrevEst5_17_sim <- 
+    PrevEst5_17_sim %>%  
+    mutate(logit_Pi_se = (logit_ci_upper-logit_ci_lower)/(2*1.96)) 
+  
+  PrevEst5_17_sim <- 
+    PrevEst5_17_sim %>% 
+    mutate(logit_Pi_sim = rnorm(30,logit_Pi,logit_Pi_se)) # this is a strange use of rnorm, but it does work when done in conjunction with mutate function.
+  
+  # SIMULATED NATIONAL PREVALENCE ESTIMATE #
+  
+  PrevEst5_17_sim <- 
+    PrevEst5_17_sim %>%   
+    mutate(Pi_sim = exp(logit_Pi_sim)/(1+exp(logit_Pi_sim)))
+  
+  ##Write to CSV
+  
+  #write.csv(PrevEst5_17_sim,"PrevEst5_17_sim1.csv", row.names = TRUE)
+  
+  
+  GEO_DEM_POP_PREV <-
+    left_join(PrevEst5_17_sim, PopEst5_17, by = c("Sex"="Sex","Age"="Age_Category"))
+  
+  # CALCULATE SIMULATED PREVALENCE COUNT BY OFFICIAL CODE, CONDITION, AGE CATEGORY AND GENDER #
+  
+  GEO_DEM_POP_PREV <- GEO_DEM_POP_PREV %>%
+    mutate(L_count = Age_cat_pop * Pi_sim)
+  
+  # GROUP PERSONS BY OFFICIAL CODE #
+  
+  by_OfficialCode_p <-
+    group_by(GEO_DEM_POP_PREV,OfficialCode, Condition)
+  
+  # AGGREGATED SIMULATED PERSONS COUNT, POP AND PREV BY OFFICIAL CODE #
+  
+  Prev_Count_OfficialCode_p <- 
+    summarize(by_OfficialCode_p, Sex=4, Local_count = sum(L_count), Local_pop = sum(Age_cat_pop), Local_prev = Local_count/Local_pop)
+
+  # GROUP MALE  BY OFFICIAL CODE #
+  
+  by_OfficialCode_m <-
+    group_by(GEO_DEM_POP_PREV,OfficialCode, Condition) %>%
+    filter (Sex == 1) 
+  
+  # AGGREGATED SIMULATED MALE COUNT, POP AND PREV BY OFFICIAL CODE #
+  
+  Prev_Count_OfficialCode_m <- 
+    summarize(by_OfficialCode_m, Sex=1, Local_count = sum(L_count), Local_pop = sum(Age_cat_pop), Local_prev = Local_count/Local_pop)
+  
+  # GROUP FEMALE  BY OFFICIAL CODE #
+  
+  by_OfficialCode_f <-
+    group_by(GEO_DEM_POP_PREV,OfficialCode, Condition) %>%
+    filter (Sex == 2) 
+  
+  # AGGREGATED SIMULATED FEMALE COUNT, POP AND PREV BY OFFICIAL CODE #
+  
+  Prev_Count_OfficialCode_f <- 
+    summarize(by_OfficialCode_f, Sex=2, Local_count = sum(L_count), Local_pop = sum(Age_cat_pop), Local_prev = Local_count/Local_pop)
+  
+    #####################
+
+  # MALE
+  
+  # EXTRACT COUNT ONLY #
+  
+  Prev_Count_OfficialCode_reduced_m <-
+    pull(Prev_Count_OfficialCode_m,Local_count)
+  
+  # TRANSPOSE THE VECTOR #
+  
+  Prev_Count_OfficialCode_reduced_m.t <- t(Prev_Count_OfficialCode_reduced_m) 
+
+  # ADDING TO RESULTS TABLE #
+  
+  building_results_table <- rbind(Simulation_results_table_m,Prev_Count_OfficialCode_reduced_m.t)
+  
+  Simulation_results_table_m <- building_results_table
+  
+  # FEMALE
+  
+  # EXTRACT COUNT ONLY #
+  
+  Prev_Count_OfficialCode_reduced_f <-
+    pull(Prev_Count_OfficialCode_f,Local_count)
+  
+  # TRANSPOSE THE VECTOR #
+  
+  Prev_Count_OfficialCode_reduced_f.t <- t(Prev_Count_OfficialCode_reduced_f) 
+  
+  # ADDING TO RESULTS TABLE #
+  
+  building_results_table <- rbind(Simulation_results_table_f,Prev_Count_OfficialCode_reduced_f.t)
+  
+  Simulation_results_table_f <- building_results_table
+  
+  # PERSONS
+  
+  # EXTRACT COUNT ONLY #
+  
+  Prev_Count_OfficialCode_reduced_p <-
+    pull(Prev_Count_OfficialCode_p,Local_count)
+  
+  # TRANSPOSE THE VECTOR #
+  
+  Prev_Count_OfficialCode_reduced_p.t <- t(Prev_Count_OfficialCode_reduced_p) 
+  
+  # ADDING TO RESULTS TABLE #
+  
+  building_results_table <- rbind(Simulation_results_table_p,Prev_Count_OfficialCode_reduced_p.t)
+  
+  Simulation_results_table_p <- building_results_table
+  
+}
+
+rownames(Simulation_results_table_m) <- Number_iterations  
+
+rownames(Simulation_results_table_f) <- Number_iterations  
+
+rownames(Simulation_results_table_p) <- Number_iterations  
+
+
+# GETTING NTH VALUES #
+
+# MALE
+
+CI_Table.95_m <- matrix(NA,nrow=0, ncol=2)
+CI_probs <- c(0.025, 0.975)
+
+for (i in 1:length(Headings_vector)) {
+  Heading_column_vector <- Simulation_results_table_m[,i]
+  Heading_column_vector.S <- sort(Heading_column_vector)
+  CI_Lower_Upper <- quantile(Heading_column_vector.S, CI_probs)
+  Building_CI_Table <- rbind(CI_Table.95_m, CI_Lower_Upper)
+  CI_Table.95_m <- Building_CI_Table
+}
+
+# FEMALE
+
+CI_Table.95_f <- matrix(NA,nrow=0, ncol=2)
+CI_probs <- c(0.025, 0.975)
+
+for (i in 1:length(Headings_vector)) {
+  Heading_column_vector <- Simulation_results_table_f[,i]
+  Heading_column_vector.S <- sort(Heading_column_vector)
+  CI_Lower_Upper <- quantile(Heading_column_vector.S, CI_probs)
+  Building_CI_Table <- rbind(CI_Table.95_f, CI_Lower_Upper)
+  CI_Table.95_f <- Building_CI_Table
+}
+
+# PERSONS
+
+CI_Table.95_p <- matrix(NA,nrow=0, ncol=2)
+CI_probs <- c(0.025, 0.975)
+
+for (i in 1:length(Headings_vector)) {
+  Heading_column_vector <- Simulation_results_table_p[,i]
+  Heading_column_vector.S <- sort(Heading_column_vector)
+  CI_Lower_Upper <- quantile(Heading_column_vector.S, CI_probs)
+  Building_CI_Table <- rbind(CI_Table.95_p, CI_Lower_Upper)
+  CI_Table.95_p <- Building_CI_Table
+}
+
+rownames(CI_Table.95_m) <- Headings_vector
+
+rownames(CI_Table.95_f) <- Headings_vector
+
+rownames(CI_Table.95_p) <- Headings_vector
+
+# MALE
+
+CI_Table.95.dt_m <- data.table(CI_Table.95_m,keep.rownames = TRUE) %>%
+  setnames(old=c("rn","2.5%","97.5%"), new=c("OfficialCode_Condition","ci_count_lower","ci_count_upper"))
+
+CI_Table.95.SPLIT_m <-
+  str_split_fixed(CI_Table.95.dt_m$OfficialCode_Condition, " ", 2)
+
+CI_Table.95.dt_m <- cbind(CI_Table.95.dt_m,CI_Table.95.SPLIT_m) %>%
+  rename(
+    OfficialCode = V1,
+    Condition = V2)
+
+CI_Table.95.dt_m$Sex <- 1
+
+# FEMALE
+
+CI_Table.95.dt_f <- data.table(CI_Table.95_f,keep.rownames = TRUE) %>%
+  setnames(old=c("rn","2.5%","97.5%"), new=c("OfficialCode_Condition","ci_count_lower","ci_count_upper"))
+
+CI_Table.95.SPLIT_f <-
+  str_split_fixed(CI_Table.95.dt_f$OfficialCode_Condition, " ", 2)
+
+CI_Table.95.dt_f <- cbind(CI_Table.95.dt_f,CI_Table.95.SPLIT_f) %>%
+  rename(
+    OfficialCode = V1,
+    Condition = V2)
+
+CI_Table.95.dt_f$Sex <- 2
+
+# PERSONS
+
+CI_Table.95.dt_p <- data.table(CI_Table.95_p,keep.rownames = TRUE) %>%
+  setnames(old=c("rn","2.5%","97.5%"), new=c("OfficialCode_Condition","ci_count_lower","ci_count_upper"))
+
+CI_Table.95.SPLIT_p <-
+  str_split_fixed(CI_Table.95.dt_p$OfficialCode_Condition, " ", 2)
+
+CI_Table.95.dt_p <- cbind(CI_Table.95.dt_p,CI_Table.95.SPLIT_p) %>%
+  rename(
+    OfficialCode = V1,
+    Condition = V2)
+
+CI_Table.95.dt_p$Sex <- 4
+
+# JOINING CI TABLES
+
+CI_Table.95.dt <- rbind (CI_Table.95.dt_m,CI_Table.95.dt_f,CI_Table.95.dt_p)
+
+str(CI_Table.95.dt)
+# JOINING COUNT TO CIs # 
+
+COUNTS_PROPS_CIs_OFFICIALCODE_CONDITION <- 
+ left_join(PrevPop2019_mfp, CI_Table.95.dt, by = c("OfficialCode"="OfficialCode", "Condition"="Condition", "Sex"="Sex")) %>%
+ mutate(ci_prev_lower = ci_count_lower / Local_pop_5_17, ci_prev_upper = ci_count_upper / Local_pop_5_17)
+
+#####################
+# WRITE TO CSV #
+
+#write.csv(COUNTS_PROPS_CIs_OFFICIALCODE_CONDITION, file = "COUNTS_CIs_CS_5_17_LOCAL_100i_TRAINING_VERSION.csv")  
+
+
+
