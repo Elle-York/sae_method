@@ -1,0 +1,146 @@
+The following lookup files need to be produced for each indicator refresh. A summary of what each one is and how they are created / QA'd can be found below.
+
+LA_List
+CQC_LUP
+GP_LA_LUP
+GPtoCCG
+UTLA_LUP
+CCGLUP19
+
+
+LA_List
+
+This file contains a list of postcodes of care homes in England. The list is derived from the care directory with filters file from the CQC website at the below link:
+
+https://www.cqc.org.uk/about-us/transparency/using-cqc-data
+
+If you are doing a QA check, use the file that has already been downloaded as there are regular updates to the file on the CQC website. The downloaded files will be in the data folder with a file name something like 'HSCA active locations'. 
+
+The following filters need to be applied to the file.
+
+  Care home? = Y
+  Location Type/Sector = Social Care Org
+  Location Inspection Directorate = Adult social care
+  Location Primary Inspection Category = Residential social care
+  Service user band - Dementia = Y
+  Service user band - Older People = Y
+Once the filters have been applied, use the 'Location Postal Code' column to create the original / QA lookup file . See previous year's data for format. 
+
+
+
+CQC_LUP
+
+This file contains reformatted postcodes from the LA_List lookup file, with decode columns for the relevant UTLA, region and country which can be found using sql server.
+
+The postcodes need to be updated so that they are all 7 characters in length but the apostrophes and commas need to be kept in and the list needs to be deduped. To do this:
+
+The 6 character postcodes (eg B5 7PR) need an extra space adding to the middle
+The 7 character postcodes (eg AL1 2PB) need to stay as they are
+The 8 character postcodes (eg AL10 0BU) need to have the middle space removed
+We then need to search for the revised postcodes on the relevant postcode table in SQL, eg. [LookupsShared].[dbo].[vONS_NSPL_UK_201805] and bring back the related LSOA11. The postcodes will now match in to the [pcd] field. The LSOA11s can then be matched into the [LookupsShared].[dbo].[vLKP_LSOA11] table to pull in the latest UTLA and region codes needed for the CQC_LUP file. The below code can be used for this task.
+
+SELECT
+
+[pcd],[UTLAApr19CD] as utla, [RGN09CD] as Region, [CTRY09CD] as Country
+
+ FROM [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as a
+
+ left join [LookupsShared].[dbo].[vLKP_LSOA11] as b on b.LSOA11CD = a.lsoa11
+
+ WHERE pcd IN ('AL1 2PB', etc...)
+
+Missing postcodes
+
+Usually there will be a handful of postcodes that are not in the postcode table and we need to look these up manually.
+
+The missing postcodes can be entered into the below web page to find the name of the council.
+
+ https://www.gov.uk/find-local-council
+
+The top council shown in the result will be the upper tier council and for some postcodes a lower tier council will also be shown at the bottom. The upper tier council is the one we need for the look up file.
+
+Finding ONS codes from the council name
+
+The below code can be used to find the UTLA / region / country codes using the council name given on the web page above.
+
+SELECT
+
+UTLAapr19NM, UTLAapr19CD, RGN09CD, [CTRY09CD]
+
+FROM [LookupsShared].[dbo].[vLKP_UTLAapr19]
+
+WHERE UTLAapr19NM LIKE '%Westminster%'
+
+
+
+GP_LA_LUP
+
+Use the following code to create this lookup file but make sure the ODS_GPPracCCG table has an appropriate snapshot date and the ONS_NSPL_UK table has an appropriate extract date.
+
+The below table uses a snapshot from apr 2019 which we are using to decode 2018 / 2019 indicator data. (7,245 records for this update)
+
+Select [GPPracCDH] as [GP_Code],
+        [UTLAApr19CD] as [UTLA],
+        [RGN09CD] as [Region],
+        [CTRY09CD]
+From [BirthsDeaths_Analysis].[dbo].[NDI_vODS_GPPracCCG_20190401_extracted_20190612] as prac
+Left join [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as nspl on nspl.[pcds]=prac.[GPPracPostcode_at_ExtractDate]
+left join [LookupsShared].[dbo].[vLKP_LSOA11] as LSOA on LSOA.[LSOA11CD] = nspl.[lsoa11]
+Where ctry = 'E92000001'
+
+Missing Practices
+
+Some practices from the dementia register data will not be matched to the latest GP practice snapshot. These can usually be found in the eppracur file which can be downloaded from NHS digital here:
+
+<add link here>
+
+Get the postcode of each missing practice from the eppracur file and put them into the below code to bring back the corresponding la and region codes:
+
+SELECT
+[pcds],[UTLAApr19CD] as utla, [RGN09CD] as Region, [CTRY09CD] as Country
+ FROM [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as a
+ left join [LookupsShared].[dbo].[vLKP_LSOA11] as b on b.LSOA11CD = a.lsoa11
+ WHERE pcds IN ('AL1 2PB', etc...);
+
+
+
+GPtoCCG
+
+Use the following code to create this lookup file but make sure the ODS_GPPracCCG table has an appropriate snapshot date and the ONS_NSPL_UK table has an appropriate extract date.
+
+The below table uses a snapshot from apr 2019 which we are using to decode 2018 / 2019 indicator data.(7,245 records for this update)
+
+Select [GPPracCDH],
+[GPPracNM],
+[GPPracPostcode_at_ExtractDate],
+CCGCDH,
+CCGNM
+From [BirthsDeaths_Analysis].[dbo].[NDI_vODS_GPPracCCG_20190401_extracted_20190612] as prac
+Left join [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as nspl on nspl.[pcds]=prac.[GPPracPostcode_at_ExtractDate]
+Where ctry = 'E92000001'
+
+
+
+UTLA_LUP
+
+Use the following code to pull the data for this file but check that 2019 is the latest version of LA boundaries. If you are QAing this file, just need to check the headings and record count are right, no need to rerun the code.
+
+SELECT  distinct laua, [LTLAApr19CD],[LTLAApr19NM],[UTLAApr19CD],[UTLAApr19NM],[RGN09CD],[RGN09NM],[CTRY09CD]
+FROM [LookupsShared].[dbo].[vLKP_LSOA11] as b
+left join [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as a on b.LSOA11CD = a.lsoa11
+
+
+
+CCGLUP19
+
+Use the following code to pull the data for this file but check that 2019 is the latest version of the CCG boundaries and the latest STP groupings were implemented in 2018. If you are QAing this file, just need to check the headings and record count are right, no need to rerun the code.
+
+SELECT
+[CCGApr19CD],
+[CCGApr19CDH],
+[CCGApr19NM],
+[CTRY09CD],
+[CTRY09NM],
+[STP18CD],
+[STP18NM]
+FROM [LookupsShared].[dbo].[vLKP_CCGApr19]
