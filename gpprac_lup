@@ -1,0 +1,31 @@
+GP Practice Look-Up
+1.	You first need to locate a list of GP practices along with their postcode. 
+2.	To do this you need to visit the following website: https://digital.nhs.uk/services/organisation-data-service/data-downloads/gp-and-gp-practice-related-data
+3.	Locate the file called 'eppracur' (GP Practices).
+4.	Put the postcodes into SQL and find the local authority you want (Generally most of our data has the CCG list included).
+
+/* Pop your postcodes below and find the laua, this then needs aggregating up to UTLA13 and then Region */
+
+
+SELECT
+[pcds],[UTLAApr19CD] as utla, [RGN09CD] as Region, [CTRY09CD] as Country
+ FROM [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as a
+ left join [LookupsShared].[dbo].[vLKP_LSOA11] as b on b.LSOA11CD = a.lsoa11
+ WHERE pcds IN ('AL1 2PB', etc...);
+Select [GPPracCDH] as [GP_Code],
+		[UTLAApr19CD] as [UTLA],
+		[RGN09CD] as [Region],
+        [CTRY09CD]
+From [LookupsShared].[dbo].[vODS_GPPracCCG_Latest] as prac
+Left join [LookupsShared].[dbo].[vONS_NSPL_UK_201805] as nspl on nspl.[pcds]=prac.[GPPracPostcode_at_ExtractDate]
+left join [LookupsShared].[dbo].[vLKP_LSOA11] as LSOA on LSOA.[LSOA11CD] = nspl.[lsoa11]
+
+Select [GPPracCDH], 
+		[GPPracNM], 
+		[GPPracPostcode_at_ExtractDate], 
+		CCGCDH, 
+		CCGNM
+From [LookupsShared].[dbo].[vODS_GPPracCCG_Latest] as prac
+Left join [LookupsShared].[dbo].[vONS_NSPL_UK_201905] as nspl on nspl.[pcds]=prac.[GPPracPostcode_at_ExtractDate] 
+Where (GPPracRoleEnd is null ) and ctry = 'E92000001'
+order by GPPracCDH
